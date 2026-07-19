@@ -1,4 +1,325 @@
 import streamlit as st
+import pandas as pd
+from datetime import datetime
+import time
+
+# --- STAGE 1: SYSTEM & INTERFACE VIEW SETUP ---
+st.set_page_config(page_title="Central Workbook Portal", page_icon="📊", layout="wide")
+
+# --- INITIALIZE CORE SESSION STATES BEFORE ANY ROUTING RUNS (CRASH firewall) ---
+if "navigation_radio" not in st.session_state:
+    st.session_state.navigation_radio = "👥 User Download Deck"
+
+if "admin_logged_in" not in st.session_state:
+    st.session_state.admin_logged_in = False
+
+if "user_verified" not in st.session_state:
+    st.session_state.user_verified = False
+
+if "user_name" not in st.session_state:
+    st.session_state.user_name = ""
+
+if "user_email" not in st.session_state:
+    st.session_state.user_email = ""
+
+st.title("📊 Excel Tracker Workbook Portal")
+
+# --- STAGE 2: CLOUD DB ACCESS ENGINE ---
+raw_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
+sheet_id = raw_url.split("/d/")[1].split("/")[0]
+
+def fetch_sheet_data(worksheet_name):
+    try:
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={worksheet_name}"
+        df = pd.read_csv(csv_url)
+        return df.dropna(how="all")
+    except Exception:
+        if worksheet_name == "user_permissions":
+            return pd.DataFrame(columns=['email', 'full_name', 'status', 'requested_at'])
+        elif worksheet_name == "excel_assets":
+            return pd.DataFrame(columns=['asset_id', 'asset_name', 'download_link', 'added_by'])
+        else:
+            return pd.DataFrame(columns=['user_identity', 'action_type', 'target_asset', 'timestamp'])
+
+# --- INSTANT PAGE SWITCHER CALLBACK (CRASH PROOF) ---
+def handle_page_switch():
+    if "navigation_radio" not in st.session_state:
+        st.session_state.navigation_radio = "👥 User Download Deck"
+    
+    selected_mode = st.session_state.navigation_radio
+    if selected_mode == "🔐 Admin Console":
+        st.query_params["active_page"] = "Admin"
+    else:
+        st.query_params["active_page"] = "User"
+
+# --- LOCAL REAL-TIME LAYER CACHE ---
+if "local_users" not in st.session_state:
+    st.session_state.local_users = fetch_sheet_data("user_permissions")
+if "local_assets" not in st.session_state:
+    st.session_state.local_assets = fetch_sheet_data("excel_assets")
+if "local_logs" not in st.session_state:
+    st.session_state.local_logs = fetch_sheet_data("portal_audit_logs")
+
+# Helper function to check status locally
+def check_user_status(email):
+    df = st.session_state.local_users
+    if not df.empty and email.lower().strip() in df['email'].values:
+        return df[df['email'] == email.lower().strip()]['status'].values[0]
+    return None
+
+# --- SIDEBAR ROUTING NAVIGATION CONTAINER ---
+url_active_page = st.query_params.get("active_page", "User")
+default_index = 1 if url_active_page == "Admin" else 0
+
+portal_mode = st.sidebar.radio(
+    "Navigate Gateway", 
+    ["👥 User Download Deck", "🔐 Admin Console"], 
+    index=default_index, 
+    key="navigation_radio", 
+    on_change=handle_page_switch
+)
+
+# -------------------------------------------------------------------
+# GATEWAY 1: ADMIN CONSOLE
+# -------------------------------------------------------------------
+if portal_mode == "🔐 Admin Console":
+    st.write("---")
+    st.header("🛠️ Operations Control (Admin Panel)")
+    
+    if not st.session_state.admin_logged_in:
+        with st.form("admin_auth_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            if st.form_submit_button("Authorize"):
+                if username == "admin" and password == "password123":
+                    st.session_state.admin_logged_in = True
+                    st.query_params["active_page"] = "Admin"
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials.")
+    else:
+        if st.button("Log Out Admin Session"):
+            st.session_state.admin_logged_in = False
+            st.query_params.clear()
+            st.query_params["active_page"] = "Admin"
+            st.rerun()
+            
+        st.write("---")
+        
+        # DYNAMIC LIVE UPDATING WORKFLOW CONTAINER (Auto updates every 5 seconds)
+        @st.fragment(run_every=5)
+        def render_live_admin_data():
+            st.subheader("🔑 Pending Access Requests Verification")
+            users_df = st.session_state.local_users
+            pending_users = users_df[users_df['status'] == 'Pending'] if not users_df.empty else pd.DataFrame()
+            
+            if pending_users.empty:
+                st.info("No corporate users currently awaiting infrastructure verification approval.")
+            else:
+                for idx, row in pending_users.iterrows():
+                    col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                    col1.write(f"📧 **{row['email']}** (Submitted Name: {row['full_name']})")
+                    col2.write(f"Requested: {row['requested_at']}")
+                    
+                    if col3.button("Approve Access", key=f"app_{row['email']}"):
+                        st.session_state.local_users.loc[st.session_state.local_users['email'] == row['email'], 'status'] = 'Approved'
+                        
+                        # Append log tracking trail row
+                        new_log = pd.DataFrame([{
+                            "user_identity": "Admin", "action_type": "Approved Access",
+                            "target_asset": row['email'], "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }])
+                        st.session_state.local_logs = pd.concat([st.session_state.local_logs, new_log], ignore_index=True)
+                        st.success(f"Access token authorized for {row['email']}")
+                        time.sleep(0.4)
+                        st.rerun()
+                        
+                    if col4.button("Reject Request", key=f"rej_{row['email']}"):
+                        st.session_state.local_users.loc[st.session_state.local_users['email'] == row['email'], 'status'] = 'Rejected'
+                        
+                        new_log = pd.DataFrame([{
+                            "user_identity": "Admin", "action_type": "Rejected Access",
+                            "target_asset": row['email'], "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }])
+                        st.session_state.local_logs = pd.concat([st.session_state.local_logs, new_log], ignore_index=True)
+                        st.warning(f"Access request denied for {row['email']}")
+                        time.sleep(0.4)
+                        st.rerun()
+
+            st.write("---")
+            
+            # ACTIVE USER CONTROL AND BAN DECK
+            st.subheader("🛡️ Infrastructure Access Control & Permanent Ban Deck")
+            managed_users = users_df[users_df['status'].isin(['Approved', 'Rejected', 'Banned'])] if not users_df.empty else pd.DataFrame()
+            
+            if managed_users.empty:
+                st.info("No verified corporate accounts loaded in framework records yet.")
+            else:
+                for idx, row in managed_users.iterrows():
+                    col_user, col_state, col_action = st.columns([4, 2, 2])
+                    col_user.write(f"👤 **{row['full_name']}** — {row['email']}")
+                    
+                    if row['status'] == 'Approved':
+                        col_state.markdown("🟢 <span style='color:green;font-weight:bold;'>Active Access</span>", unsafe_allow_html=True)
+                        if col_action.button("🚨 Revoke & Permanent Ban", key=f"ban_{row['email']}", use_container_width=True):
+                            st.session_state.local_users.loc[st.session_state.local_users['email'] == row['email'], 'status'] = 'Banned'
+                            new_log = pd.DataFrame([{
+                                "user_identity": "Admin", "action_type": "PERMANENTLY BANNED",
+                                "target_asset": row['email'], "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }])
+                            st.session_state.local_logs = pd.concat([st.session_state.local_logs, new_log], ignore_index=True)
+                            st.error(f"Account {row['email']} blacklisted permanently.")
+                            time.sleep(0.4)
+                            st.rerun()
+                    elif row['status'] == 'Rejected':
+                        col_state.markdown("🟡 <span style='color:orange;font-weight:bold;'>Rejected</span>", unsafe_allow_html=True)
+                        if col_action.button("🚨 Permanent Ban Override", key=f"ban_{row['email']}", use_container_width=True):
+                            st.session_state.local_users.loc[st.session_state.local_users['email'] == row['email'], 'status'] = 'Banned'
+                            st.rerun()
+                    elif row['status'] == 'Banned':
+                        col_state.markdown("🔴 <span style='color:red;font-weight:bold;'>❌ PERMANENTLY BANNED</span>", unsafe_allow_html=True)
+                        if col_action.button("🟢 Lift Ban & Restore", key=f"unban_{row['email']}", use_container_width=True):
+                            st.session_state.local_users.loc[st.session_state.local_users['email'] == row['email'], 'status'] = 'Pending'
+                            st.rerun()
+
+            st.write("---")
+            st.subheader("📋 Infrastructure Audit Log (Signing & Downloads)")
+            if not st.session_state.local_logs.empty:
+                st.table(st.session_state.local_logs.iloc[::-1].head(10))
+            else:
+                st.info("No audit logs recorded yet.")
+
+        render_live_admin_data()
+
+        st.write("---")
+        st.subheader("Register New Master Tracker Asset Link")
+        with st.form("register_asset_link_form"):
+            asset_title = st.text_input("Excel Workbook Name (e.g., Attendance Tracker V3)")
+            asset_url = st.text_input("Asset Destination Link (Google Sheet url or Sharepoint cloud address)")
+            asset_btn = st.form_submit_button("Deploy Tracker Asset to Repository")
+            
+            if asset_btn:
+                if not asset_title or not asset_url:
+                    st.error("All tracker file fields are parameter mandatory.")
+                else:
+                    new_id = f"ASSET-{int(time.time())}"
+                    new_asset_row = pd.DataFrame([{
+                        "asset_id": new_id, "asset_name": asset_title,
+                        "download_link": asset_url, "added_by": "SYSTEM_ADMIN"
+                    }])
+                    st.session_state.local_assets = pd.concat([st.session_state.local_assets, new_asset_row], ignore_index=True)
+                    st.success(f"Successfully deployed tracker layout for '{asset_title}'!")
+                    time.sleep(0.4)
+                    st.rerun()
+
+        st.write("---")
+        st.subheader("Current Manifest Assets")
+        if not st.session_state.local_assets.empty:
+            for idx, row in st.session_state.local_assets.iterrows():
+                col_name, col_del = st.columns([5, 1])
+                col_name.write(f"📂 **{row['asset_name']}** — ID: `{row['asset_id']}`")
+                if col_del.button("Delete Link Reference", key=f"del_{row['asset_id']}"):
+                    st.session_state.local_assets = st.session_state.local_assets[st.session_state.local_assets['asset_id'] != row['asset_id']]
+                    st.warning("Workbook link reference removed.")
+                    time.sleep(0.4)
+                    st.rerun()
+
+# -------------------------------------------------------------------
+# GATEWAY 2: USER DOWNLOAD DECK
+# -------------------------------------------------------------------
+else:
+    st.write("---")
+    
+    @st.fragment(run_every=5)
+    def render_live_user_portal():
+        if st.session_state.user_verified and st.session_state.user_email:
+            db_status = check_user_status(st.session_state.user_email)
+            if db_status != 'Approved':
+                st.session_state.user_verified = False
+                st.rerun()
+
+        if st.session_state.user_verified:
+            st.subheader("📁 Available Operational Excel Workbooks")
+            
+            if st.session_state.local_assets.empty:
+                st.info("No spreadsheet tracker metrics uploaded by administration yet.")
+            else:
+                st.markdown("""
+                    <style>
+                    .list-row-container {
+                        display: flex; align-items: center; background-color: #ffffff;
+                        padding: 10px 15px; border-radius: 6px; border: 1px solid #e2e8f0;
+                        border-left: 5px solid #107c41; height: 46px;
+                    }
+                    .excel-icon { font-size: 20px; margin-right: 12px; color: #107c41; display: inline-block; }
+                    .file-title { font-weight: 600; color: #2d3748; font-size: 15px; display: inline-block; }
+                    </style>
+                """, unsafe_allow_html=True)
+
+                for idx, row in st.session_state.local_assets.iterrows():
+                    file_col, btn_col = st.columns([3, 1])
+                    with file_col:
+                        st.markdown(f"""
+                            <div class="list-row-container">
+                                <div class="excel-icon">📊</div>
+                                <div class="file-title">{row['asset_name']}</div>
+                            </div>
+                        """, unsafe_allow_html=True)
+                    with btn_col:
+                        # Renders clean, hyper-responsive button pointing securely out to the document target URL
+                        st.markdown(f'<a href="{row["download_link"]}" target="_blank" style="text-decoration:none;"><button style="background-color:#107c41;color:white;border:none;padding:12px;border-radius:4px;cursor:pointer;width:100%;font-weight:bold;">📊 Open Workbook</button></a>', unsafe_html=True)
+            st.write("---")
+
+        st.header("👥 User Download Deck")
+        
+        if not st.session_state.user_verified:
+            st.info("🔒 The download catalog is locked. Please enter your valid corporate credentials below to unlock available trackers.")
+            
+            with st.form("user_identity_form"):
+                name = st.text_input("Full Name")
+                email = st.text_input("Corporate Email Address (@amazon.com)")
+                enter_portal = st.form_submit_button("Verify Identity & Unlock Portal")
+                
+                if enter_portal:
+                    if not name.strip() or not email.strip():
+                        st.error("All identification fields are mandatory.")
+                    elif not email.lower().strip().endswith("@amazon.com"):
+                        st.error("⚠️ Access Denied. Valid corporate @amazon.com email required.")
+                    else:
+                        clean_email = email.strip().lower()
+                        status = check_user_status(clean_email)
+                        
+                        if status == 'Banned':
+                            st.error("⛔ Access Denied: Form submissions are disabled for this account identity.")
+                        elif status == 'Rejected':
+                            st.error("❌ Access Denied: This request was rejected by administration parameters.")
+                        elif status == 'Pending':
+                            st.warning("⏳ Access Request Pending: Your corporate email is awaiting structural activation by 'esrohit'.")
+                        elif status is None:
+                            new_u = pd.DataFrame([{
+                                "email": clean_email, "full_name": name.strip(),
+                                "status": "Pending", "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }])
+                            st.session_state.local_users = pd.concat([st.session_state.local_users, new_u], ignore_index=True)
+                            st.warning("🔒 Access Blocked: Email unregistered. Verification request submitted to Admin dashboard. Contact point: 'esrohit'")
+                        elif status == 'Approved':
+                            st.session_state.user_verified = True
+                            st.session_state.user_name = name.strip()
+                            st.session_state.user_email = clean_email
+                            
+                            new_log = pd.DataFrame([{
+                                "user_identity": clean_email, "action_type": "Logged In Portal",
+                                "target_asset": "Download Deck Dashboard", "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }])
+                            st.session_state.local_logs = pd.concat([st.session_state.local_logs, new_log], ignore_index=True)
+                            st.rerun()
+        else:
+            st.success(f"🔓 Access Authorized: **{st.session_state.user_email}**")
+            if st.button("Exit Portal Session"):
+                st.session_state.user_verified = False
+                st.rerun()
+
+    render_live_user_portal()import streamlit as st
 import os
 import sqlite3
 import time

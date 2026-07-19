@@ -83,6 +83,10 @@ def log_audit_event(user_id, action, asset):
     conn.commit()
     conn.close()
 
+# --- INITIALIZE TERMINAL NAVIGATION STATES ---
+if "navigation_radio" not in st.session_state:
+    st.session_state.navigation_radio = "👥 User Download Deck"  # Default initial page
+    
 # --- INSTANT PAGE SWITCHER CALLBACK ---
 def handle_page_switch():
     selected_mode = st.session_state.navigation_radio
